@@ -1,73 +1,72 @@
+// signaling-server.js
 const WebSocket = require('ws');
-const { v4: uuidv4 } = require('uuid');
 
-// Render akan set PORT lewat environment variable
 const PORT = process.env.PORT || 8080;
-
-// Membuat WebSocket server
 const wss = new WebSocket.Server({ port: PORT });
+
+let hosts = {};   // hostId -> ws
+let clients = {}; // clientId -> ws
 
 console.log(`Signaling server running on ws://localhost:${PORT}`);
 
-// Struktur data host: hostId -> { ws, deviceName, deviceAddress }
-let hosts = {};
-
-// Ketika ada client / host connect
 wss.on('connection', ws => {
-  let clientId = uuidv4(); // ID unik untuk setiap koneksi
-  console.log(`Client connected: ${clientId}`);
+  console.log('New connection');
 
-  ws.on('message', message => {
+  ws.on('message', msg => {
     let data;
-    try { data = JSON.parse(message); } catch(e) { return; }
+    try { data = JSON.parse(msg); } catch (e) {
+      console.log('Invalid JSON:', msg);
+      return;
+    }
 
-    switch(data.action) {
+    const action = data.action;
+    const targetId = data.to;
 
-      // Registrasi host
+    switch (action) {
       case 'register_host':
-        if(data.hostId && data.deviceName && data.deviceAddress){
-          hosts[data.hostId] = {
-            ws,
-            deviceName: data.deviceName,
-            deviceAddress: data.deviceAddress
-          };
-          console.log(`Host registered: ${data.deviceName} (${data.deviceAddress})`);
-        }
+        if (!data.hostId) return;
+        hosts[data.hostId] = ws;
+        ws.hostId = data.hostId;
+        console.log(`Host registered: ${data.hostId}`);
         break;
 
-      // Client request list host
-      case 'get_host_list':
-        const hostList = Object.entries(hosts).map(([id, info]) => ({
+      case 'register_client':
+        if (!data.clientId) return;
+        clients[data.clientId] = ws;
+        ws.clientId = data.clientId;
+        console.log(`Client registered: ${data.clientId}`);
+        break;
+
+      case 'list_hosts':
+        // Kirim daftar host aktif ke client
+        const hostList = Object.keys(hosts).map(id => ({
           hostId: id,
-          deviceName: info.deviceName,
-          deviceAddress: info.deviceAddress
+          deviceName: hosts[id].deviceName || `Device ${id}`,
+          deviceAddress: hosts[id].deviceAddress || id
         }));
         ws.send(JSON.stringify({ action: 'host_list', hosts: hostList }));
         break;
 
-      // Request start streaming atau forward SDP/ICE
-      case 'start_stream':
-      case 'sdp_offer':
-      case 'sdp_answer':
-      case 'ice_candidate':
-        const targetHost = hosts[data.to];
-        if(targetHost && targetHost.ws.readyState === WebSocket.OPEN){
-          targetHost.ws.send(JSON.stringify(data));
+      default:
+        // Forward semua message ke targetId (host/client)
+        if (targetId && (hosts[targetId] || clients[targetId])) {
+          const targetWs = hosts[targetId] || clients[targetId];
+          targetWs.send(JSON.stringify(data));
+        } else {
+          console.log('Target not found or no targetId:', data);
         }
         break;
-
-      default:
-        console.log("Unknown action:", data.action);
     }
   });
 
   ws.on('close', () => {
-    // Hapus host jika ws disconnect
-    for(let id in hosts){
-      if(hosts[id].ws === ws){
-        console.log(`Host disconnected: ${hosts[id].deviceName}`);
-        delete hosts[id];
-      }
+    if (ws.hostId) {
+      delete hosts[ws.hostId];
+      console.log(`Host disconnected: ${ws.hostId}`);
+    }
+    if (ws.clientId) {
+      delete clients[ws.clientId];
+      console.log(`Client disconnected: ${ws.clientId}`);
     }
   });
 });
